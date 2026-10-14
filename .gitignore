@@ -8,6 +8,11 @@ _tmp_ocr/
 # kimi-code 工作目录（会话/记忆状态，非项目内容）
 .workbuddy/
 
+# 备份文件（git 已提供版本回滚，.bak 冗余且不入库）
+*.bak
+*.bak/
+**/.bak-*/
+
 # 密钥与凭据（若将来出现，一律不入库）
 .env
 .env.*
