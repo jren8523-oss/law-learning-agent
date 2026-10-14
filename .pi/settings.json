@@ -1,0 +1,4 @@
+{
+  "defaultTools": ["read", "powershell", "edit", "write", "grep", "find", "ls"],
+  "hideThinkingBlock": true
+}

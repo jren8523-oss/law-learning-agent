@@ -1,0 +1,19 @@
+# 原始 PDF 与 OCR 临时产物（体积大、非派生品，不入库）
+material/
+_tmp_ocr/
+
+# Obsidian 瞬时工作区状态（打开文件记录，频繁变动）
+.obsidian/workspace.json
+
+# kimi-code 工作目录（会话/记忆状态，非项目内容）
+.workbuddy/
+
+# 密钥与凭据（若将来出现，一律不入库）
+.env
+.env.*
+*.pem
+*.key
+
+# 系统/编辑器
+.DS_Store
+Thumbs.db
