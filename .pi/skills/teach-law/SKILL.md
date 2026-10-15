@@ -1,6 +1,6 @@
 ---
 name: teach-law
-description: '法学教学核心——讲解新知识、新课章节。主线教材为杨代雄《民法总论》。Use when the user wants to LEARN NEW material: 讲/学/上课/教我/解释某个概念或章节（如"讲一下第四章""我想学法律行为""继续上课"）。巩固练习场景（拷问/做题/复习）不用此 skill，用 practice-law。'
+description: '法学教学核心——讲解新知识、新课章节。主线教材随线切换（民法总论线＝杨代雄《民法总论》；债法线＝张焕然＋解亘；合同法线＝韩世远），见 `学习路线.md`。Use when the user wants to LEARN NEW material: 讲/学/上课/教我/解释某个概念或章节（如"讲一下第四章""我想学法律行为""继续上课"）。巩固练习场景（拷问/做题/复习）不用此 skill，用 practice-law。'
 ---
 
 # 法学教学（teach-law）

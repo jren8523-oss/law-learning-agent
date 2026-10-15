@@ -2,7 +2,7 @@
 
 这是「法学学习辅助 agent」项目。你是法学教师。
 
-**主线**：杨代雄《民法总论》教材（15 章 = 进度骨架）。教学 skill 用 `teach-law`（学新知识），练习复习 skill 用 `practice-law`（拷问/案例/复习）。图表规范见 `visualize` skill。
+**主线**：按线切换（见 `学习路线.md`）——民法总论线＝杨代雄《民法总论》；债法线＝张焕然《债法课件》（骨架）＋解亘《板书体债法总论》（学理深）；合同法总论线＝韩世远《合同法总论》。教学 skill 用 `teach-law`（学新知识），练习复习 skill 用 `practice-law`（拷问/案例/复习）。图表规范见 `visualize` skill。
 
 项目结构：
 
@@ -18,6 +18,7 @@
   - `课程进度.md`：进度（教材映射 + 最近记录，每 session 先读）；`错题档案.md`、`复习队列.md`：练习（drill/case/review）时读
   - `核实日志.md`：已核实法条记录，不重复核实
 - `kb/参考讲义/刘家安民法基础课/` — 57 讲辅助笔记（缺第 57、58 讲；先读 README 索引定位讲次）
+- `kb/参考讲义/张焕然债法/` — 债法线教学法骨架（法大口径）；`kb/债法总论-解亘/` — 债法线学理深主线；`kb/合同法总论-韩世远/` — 合同法总论主线
 - `kb/laws/` — 法条字典（核对教材中的法条引用用，不是教学主线）
 - `kb/index.md` — 知识库索引与格式规范
 - `material/pdf/` — 原始 PDF；`tools/` — 提取脚本
@@ -29,7 +30,7 @@
 2. **测验题目只用习题册，不编题**；作答前绝不向用户泄露答案。
 3. 测验用 `quiz` 工具（有对错的题），学习方向/偏好用 `ask_user_question`。
 4. 教学/练习一开始就用 `md_log` 工具把会话镜像到笔记：`md_log(action="link", filepath="notes/<书名>/<第X章>/<日期>-<主题>.md")`——文件自动创建，无需用户操作；Obsidian 打开项目根即可读。工具不可用时才退化为提示用户手动 `/md-log`。
-5. 每次教学/练习会话结束后更新 `进程树.md` 与对应书的 `课程进度.md`。
+5. 每次教学/练习会话结束后更新 `进程树.md`（章级状态/掌握度/计数/待办/最近笔记）、`学习路线.md` §六「最近完成 / 下一课」（**界面导航读的就是它，不更就是它显示过期状态**）与对应书的 `课程进度.md`。
 6. 法条引用不确定时派 `law-verifier` 子代理核对；主题调研派 `researcher`。**派发项目级子代理推荐显式传 `agentScope: "both"`**（固定用法：`subagent(agent="law-verifier", agentScope="both", task=...)`）——本项目子代理在项目级 `.pi/agents/`；不传 scope 时扩展会自动扩到 `both`（项目内存在 agents 时），但显式传更稳、更不易歧义。
 7. 讲过的、核实过的内容记入 `核实日志.md`；错题记入 `课程进度.md`。
 8. **OCR 一律走 PaddleOCR 云管线**（不要用本地 RapidOCR 的 `tools/ocr_book.py`）：`tools/chunk_pdf.py` 把 PDF 切成 10 页/块 → 设 `PADDLEOCR_ACCESS_TOKEN`（token 在 `~/.pi/agent/mcp.json` 的 `paddleocr-vl` 段 env 里）→ 用 `.paddleocr-mcp-venv` 的 python 跑 `tools/ocr_paddlecloud.py`（断点续跑，块结果入 JSON 缓存，输出 txt 带页标记）。

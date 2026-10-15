@@ -22,3 +22,7 @@ _tmp_ocr/
 # 系统/编辑器
 .DS_Store
 Thumbs.db
+
+# Python 字节码缓存
+__pycache__/
+*.pyc
