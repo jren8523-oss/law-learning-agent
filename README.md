@@ -2,9 +2,13 @@
 
 这是一个 pi 项目。你可以把它当作一个开源模板，基于它搭建任何学科的 AI 导师（目前基于法学）。
 
-![demo](assets/demo.png)
+![teaching](assets/teach.png)
 
-![menu](assets/menu.png)
+菜单（阅读选题源 / 做题选题型）：
+
+![menu-read](assets/menu-read.png)
+
+![menu-drill](assets/menu-drill.png)
 
 ## 这是什么
 
