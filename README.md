@@ -2,9 +2,15 @@
 
 这是一个 pi 项目。你可以把它当作一个开源模板，基于它搭建任何学科的 AI 导师（目前基于法学）。
 
+在项目目录里运行 `pi`，它先问你今天做什么：
+
+![menu-main](assets/menu-main.png)
+
+跟课逐页对读，双屏——左边 agent 讲解，右边是你屏幕上的课件（此处课件已打马赛克）：
+
 ![teaching](assets/teach.png)
 
-菜单（阅读选题源 / 做题选题型）：
+选到某本书 / 某个题型，菜单接着往下走：
 
 ![menu-read](assets/menu-read.png)
 
