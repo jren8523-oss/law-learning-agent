@@ -4,6 +4,8 @@
 
 ![demo](assets/demo.png)
 
+![menu](assets/menu.png)
+
 ## 这是什么
 
 我为自己构建的个人学习系统，按原样分享。它被构建成一个 pi 配置：教学哲学被编码进 skills，外加几个小扩展、源卡（source cards）和子代理定义。
