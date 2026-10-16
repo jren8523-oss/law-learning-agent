@@ -5,9 +5,11 @@ notes/
 kb/*
 !kb/README.md
 
-# 个人数据（请复制 .example 文件后填写）
+# 个人数据（首次使用时自行创建）
 profile.md
 进程树.md
+profile.example.md
+进程树.example.md
 .tmp-nav-read.txt
 
 # 个人文档
@@ -17,12 +19,11 @@ agent评估报告.md
 给朋友-经管学习agent手册.md
 PLAN.md
 
-# 非 pi 的辅助工具与配置
-tools/
+# OCR 过程缓存（个人数据）
+tools/_ocr_cache.json
+
+# Obsidian 配置
 .obsidian/
-kb/README.md
-profile.example.md
-进程树.example.md
 
 # 原始 PDF 与 OCR 临时产物（体积大、非派生品，不入库）
 
