@@ -1,57 +1,39 @@
 # 学习 Agent 启动器
 
-一个通用的 AI 辅助学习系统。法学是第一个用例，可以适配到任何学科。
+一个通用的 AI 辅助学习系统，构建为 pi 项目配置。法学是第一个用例，可以移植到任何学科。
 
 ## 这是什么
 
-不是一门课，而是一套**学习操作系统**：用 AI 客户端打开这个文件夹，它变成一个按页推着你走的老师——讲课件、带读教材、出题考你、帮你记账。
+我自己用的学习系统，按原样分享。教学哲学被编码进 skills 和扩展，外加源卡（source cards）管理多本书、多门课并行。
 
-## 两条路
+## 里面有什么
 
-### 精简版（推荐先走这条）
+- `skills/teach-law/` —— 带读教材的教学流程与纪律
+- `skills/practice-law/` —— 选择题 / 案例题判分 + 错题复习
+- `skills/visualize/` —— 法律关系图示
+- `extensions/opening-greeting/` —— 启动菜单：学科 → 模式 → 源 → 课节
+- `extensions/quiz/` —— 判分题（✓/✗、正确答案、解释）
+- `extensions/md-log/` —— 会话自动镜像到笔记文件
+- `extensions/ask-user-question/` —— 开放提问
+- `sources/` —— 一源一卡：每本书 / 每门课一张卡（frontmatter + 教法）
+- `agents/` —— `law-verifier`（法条核验）、`researcher`（调研）、`notes-editor`（讲义校对）
+- `tools/` —— Python 脚本：PDF/PPTX 转逐页文本、OCR 管线
 
-**不需要这个仓库的任何代码。** 只需要一个文件夹 + 两个 Markdown 文件 + Python 转课件脚本。任何 AI 客户端都能用，30 分钟从零到第一节课。
+## 安装
 
-👉 **[`给朋友-经管学习agent手册.md`](./给朋友-经管学习agent手册.md)**（6000 字，照着步骤 0→6 走）
-
-### 完整版（本仓库）
-
-法学版实际跑着的完整系统。多了自动菜单、判分、多子代理、账目分层等。需要**支持项目约定的 AI 客户端**（如 Kimi Code、Claude Code、Cursor）。
+这个仓库**本身就是一个项目目录**。克隆到你本地：
 
 ```
-├── .pi/                    # 扩展、skills、源卡（一源一卡架构）
-│   ├── extensions/         # 菜单、判分、笔记镜像
-│   ├── skills/             # 教学模式：带读、做题、图表
-│   └── sources/            # 每本书/每门课一张卡
-├── tools/                  # Python 脚本（pdf2md、pptx2md、OCR）
-├── material/               # 你的素材 — 不进 Git
-├── kb/                     # 你的知识库 — 不进 Git
-├── notes/                  # 你的笔记 — 不进 Git
-├── profile.example.md      # 学习者画像模板 → 复制为 profile.md
-├── 进程树.example.md       # 进度树模板 → 复制为 进程树.md
-└── 给朋友-经管学习agent手册.md
+git clone https://github.com/jren8523-oss/law-learning-agent.git my-course
+cd my-course
 ```
 
-### 怎么选
+用 pi 打开该目录即可。
 
-- **你只是想用 AI 上课** → 读手册，走精简版，别碰这个仓库的 `.pi/`
-- **你想在精简版基础上加自动判分、菜单、多线并行** → 用完整版，让 AI 帮你改 `.pi/sources/` 里的源卡和 `.pi/skills/` 里的学科纪律
+## 移植到其他学科
 
-## 适配到新学科
+这是为法学建的。想移植到经管、计算机、哲学……直接问 AI：
 
-不管走哪条路，核心改动一样：
+> 「我要学【你的学科】，目标是【考研/期末/自学】。帮我看看要改哪些文件。」
 
-| 改什么 | 精简版 | 完整版 |
-|---|---|---|
-| 学科纪律 | 改 `AGENTS.md` 里的红线 | 改 `.pi/skills/teach-law/SKILL.md` |
-| 材料范围 | 改 `AGENTS.md` 里的材料清单 | 改 `.pi/sources/` 里的源卡 |
-| 进度台账 | 手写 `进度台账.md` | 各源进度文件 + 周五汇总 |
-| 题库 | 让 AI 用课件原文出题 | 换 `.pi/sources/` 里的题库路径 |
-
-对 AI 说：「我要学【你的学科】，目标是【考研/期末/自学】。帮我看看要改哪些文件。」它会逐个帮你改。
-
-## 从哪开始
-
-👉 **[`给朋友-经管学习agent手册.md`](./给朋友-经管学习agent手册.md)** — 精简版方法论，30 分钟跑通
-
-👉 **[`PLAN.md`](./PLAN.md)** — 完整版架构说明
+AI 会读你的仓库，然后逐个文件告诉你改什么。核心要改的只有几处：`skills/` 里的学科纪律、`sources/` 里的源卡、`APPEND_SYSTEM.md` 里的规则。`extensions/` 和 `tools/` 是学科无关的，不用动。
