@@ -1,4 +1,4 @@
-﻿import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
 	Editor,
 	type EditorTheme,
@@ -9,18 +9,12 @@ import {
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import { LiveLines, LiveRegistry, hintLine, optionRow, renderEditorBlock } from "./lib/inline-question.ts";
 
 interface AskOption {
 	label: string;
 	value: string;
 	description?: string;
-}
-
-interface DisplayOption extends AskOption {
-	id: string;
-	index?: number;
-	isOther?: boolean;
-	isSubmit?: boolean;
 }
 
 interface TextAnswer {
@@ -53,6 +47,31 @@ interface AskUserQuestionResultDetails {
 	mode: AskUserQuestionMode;
 	answers: AskAnswer[];
 	message?: string;
+}
+
+/**
+ * 一次提问的活动状态。正文那一行（renderCall）和底部操作条（ctx.ui.custom）
+ * 都读它，所以「选到第几项」「Other 打了什么字」只有这一份。
+ * `version` 每变一次加一，正文那一行靠它自检重算（见 lib/inline-question.ts）。
+ */
+interface AskLive {
+	toolCallId: string;
+	question: string;
+	context: string | undefined;
+	options: AskOption[];
+	multi: boolean;
+	/** 显示行下标：单选 0..n-1＝选项、n＝Other；多选再多一行 Send。 */
+	cursor: number;
+	editing: boolean;
+	otherText: string;
+	selected: Map<string, AskAnswer>;
+	version: number;
+}
+
+const askLive = new LiveRegistry<AskLive>();
+
+function bump(live: AskLive): void {
+	live.version += 1;
 }
 
 const OptionSchema = Type.Object({
@@ -122,6 +141,75 @@ function addWrapped(lines: string[], text: string, width: number, indent = ""): 
 	for (const line of wrapTextWithAnsi(text, contentWidth)) {
 		lines.push(truncateToWidth(`${indent}${line}`, width));
 	}
+}
+
+/**
+ * 提问进行中的正文版：题干 + 选项（当前项 `> ` 高亮）+ Other（多选再加 Send）。
+ * 只在「正文」里出现，底部条不重复画这些内容。
+ */
+function renderLivePanel(theme: any, width: number, live: AskLive): string[] {
+	const lines: string[] = [];
+	const add = (text: string) => lines.push(truncateToWidth(text, width));
+	const otherLabel = getOtherLabel(live.options);
+	const otherIndex = live.options.length;
+
+	add(theme.fg("toolTitle", theme.bold("ask_user_question ")) + theme.fg("text", live.question));
+	if (live.context) {
+		addWrapped(lines, theme.fg("muted", live.context), width, "  ");
+	}
+
+	for (let i = 0; i < live.options.length; i++) {
+		const option = live.options[i];
+		const marker = live.multi ? `${live.selected.has(`option:${i}`) ? "[x]" : "[ ]"} ${i + 1}. ` : `${i + 1}. `;
+		add(optionRow(theme, live.cursor === i, `${marker}${option.label}`, option.description));
+	}
+
+	const otherText = live.otherText.trim();
+	if (live.multi) {
+		const marker = live.selected.has("other") ? "[x]" : "[ ]";
+		add(
+			optionRow(
+				theme,
+				live.cursor === otherIndex,
+				`${marker} ${otherLabel}`,
+				otherText.length > 0 ? `— ${live.otherText}` : undefined,
+			),
+		);
+		const submitLabel = live.selected.size > 0 ? `✓ Send (${live.selected.size} selected)` : "○ Send";
+		add(optionRow(theme, live.cursor === otherIndex + 1, submitLabel));
+	} else {
+		add(optionRow(theme, live.cursor === otherIndex, otherLabel, otherText.length > 0 ? `— ${live.otherText}` : undefined));
+	}
+
+	return lines;
+}
+
+/**
+ * 问答结束后的正文版：就是原来的那条静态行（标题 + Options 一览）。
+ * 答案本身由 renderResult 画在下面，所以这里不重复。
+ */
+function renderStaticPanel(theme: any, width: number, args: any): string[] {
+	const lines: string[] = [];
+	let head = theme.fg("toolTitle", theme.bold("ask_user_question ")) + theme.fg("muted", args.question);
+	if (args.multiSelect) {
+		head += theme.fg("dim", " [multi-select]");
+	}
+	addWrapped(lines, head, width);
+
+	// 这个函数现在是在「组件 render()」里跑的（renderCall 的返回值），抛异常会直接
+	// 冒到 TUI 渲染循环里 —— 参数还在流式或不合法时只画标题就好。
+	try {
+		const options = normalizeOptions(
+			args.options as Array<{ label: string; value?: string; description?: string }> | undefined,
+		);
+		if (options.length > 0) {
+			const labels = [...options.map((option) => option.label), getOtherLabel(options)].join(", ");
+			addWrapped(lines, theme.fg("dim", `Options: ${labels}`), width, "  ");
+		}
+	} catch {
+		/* 流式参数/不合法参数：忽略选项一览 */
+	}
+	return lines;
 }
 
 function formatAnswerForModel(answer: AskAnswer): string {
@@ -200,21 +288,15 @@ function buildResult(question: string, context: string | undefined, mode: AskUse
 	};
 }
 
-async function askSingleChoice(
-	ctx: any,
-	question: string,
-	context: string | undefined,
-	options: AskOption[],
-): Promise<AskAnswer | null> {
-	const otherLabel = getOtherLabel(options);
-	const allOptions: DisplayOption[] = [
-		...options.map((option, index) => ({ ...option, id: `option:${index}`, index: index + 1 })),
-		{ id: "other", label: otherLabel, value: "__other__", isOther: true },
-	];
+/**
+ * 单选：键盘在底部那一行，选项画在正文里（见 renderLivePanel）。
+ */
+async function askSingleChoice(ctx: any, live: AskLive): Promise<AskAnswer | null> {
+	const options = live.options;
+	const total = options.length + 1; // + Other
+	const otherIndex = options.length;
 
 	return ctx.ui.custom<AskAnswer | null>((tui: any, theme: any, _kb: any, done: (result: AskAnswer | null) => void) => {
-		let optionIndex = 0;
-		let editMode = false;
 		let cachedLines: string[] | undefined;
 		let cachedWidth = -1;
 		const editor = new Editor(tui, createEditorTheme(theme));
@@ -222,50 +304,55 @@ async function askSingleChoice(
 		editor.onSubmit = (value) => {
 			const trimmed = value.trim();
 			if (!trimmed) return;
+			live.otherText = trimmed;
 			done({ type: "other", label: trimmed, value: trimmed });
 		};
 
 		function refresh() {
 			cachedLines = undefined;
+			bump(live);
 			tui.requestRender();
 		}
 
 		function handleInput(data: string) {
-			if (editMode) {
+			if (live.editing) {
 				if (matchesKey(data, Key.escape)) {
-					editMode = false;
+					live.editing = false;
+					live.otherText = "";
 					editor.setText("");
 					refresh();
 					return;
 				}
 				editor.handleInput(data);
+				live.otherText = editor.getText();
 				refresh();
 				return;
 			}
 
 			if (matchesKey(data, Key.up)) {
-				optionIndex = Math.max(0, optionIndex - 1);
+				live.cursor = Math.max(0, live.cursor - 1);
 				refresh();
 				return;
 			}
 			if (matchesKey(data, Key.down)) {
-				optionIndex = Math.min(allOptions.length - 1, optionIndex + 1);
+				live.cursor = Math.min(total - 1, live.cursor + 1);
 				refresh();
 				return;
 			}
 			if (matchesKey(data, Key.enter)) {
-				const selected = allOptions[optionIndex];
-				if (selected.isOther) {
-					editMode = true;
+				if (live.cursor === otherIndex) {
+					live.editing = true;
+					live.otherText = "";
 					editor.setText("");
 					refresh();
 					return;
 				}
+				const option = options[live.cursor];
 				done({
 					type: "option",
-					label: selected.label,
-					value: selected.value,
-					index: selected.index!,
+					label: option.label,
+					value: option.value,
+					index: live.cursor + 1,
 				});
 				return;
 			}
@@ -275,51 +362,27 @@ async function askSingleChoice(
 		}
 
 		function render(width: number): string[] {
-			// The cache MUST be keyed on width: pi-tui calls requestRender() but NOT
-			// invalidate() on terminal resize, so render() can be re-entered with a
-			// new width. Returning stale wider lines trips the TUI width guard and
-			// crashes the process.
+			// 缓存按 width 记：pi-tui 在 resize 时只 requestRender、不 invalidate，
+			// render 会用新 width 重入，返回宽度不符的旧行会崩进程。
 			if (cachedLines && cachedWidth === width) return cachedLines;
 
 			const lines: string[] = [];
-			const add = (text: string) => lines.push(truncateToWidth(text, width));
-
-			add(theme.fg("accent", "─".repeat(width)));
-			addWrapped(lines, theme.fg("text", ` ${question}`), width);
-			if (context) {
-				lines.push("");
-				addWrapped(lines, theme.fg("muted", ` ${context}`), width);
-			}
-			lines.push("");
-
-			for (let i = 0; i < allOptions.length; i++) {
-				const option = allOptions[i];
-				const selected = i === optionIndex;
-				const prefix = selected ? theme.fg("accent", "> ") : "  ";
-				const label = option.isOther ? option.label : `${option.index}. ${option.label}`;
-				const styled = selected ? theme.fg("accent", label) : theme.fg("text", label);
-				add(`${prefix}${styled}`);
-				if (option.description) {
-					addWrapped(lines, theme.fg("muted", option.description), width, "     ");
-				}
-			}
-
-			if (editMode) {
-				lines.push("");
-				add(theme.fg("muted", " Write your custom answer:"));
-				for (const line of editor.render(Math.max(1, width - 2))) {
-					add(` ${line}`);
-				}
-				lines.push("");
-				add(theme.fg("dim", " Enter to submit • Esc to go back"));
+			if (live.editing) {
+				// 要打字时才展开成输入框（编辑器自带边框与光标），平时底部只有一行提示。
+				lines.push(...renderEditorBlock(theme, width, "自定义回答：", editor));
+				lines.push(hintLine(theme, width, "Enter 提交 · Esc 返回"));
 			} else {
-				lines.push("");
-				add(theme.fg("dim", " ↑↓ navigate • Enter select • Esc cancel"));
+				lines.push(hintLine(theme, width, "↑↓ 选择 · Enter 确认 · Esc 取消"));
 			}
 
-			add(theme.fg("accent", "─".repeat(width)));
-			cachedLines = lines;
-			cachedWidth = width;
+			// 编辑态不缓存：编辑器画的是活光标。
+			if (live.editing) {
+				cachedLines = undefined;
+				cachedWidth = -1;
+			} else {
+				cachedLines = lines;
+				cachedWidth = width;
+			}
 			return lines;
 		}
 
@@ -327,198 +390,142 @@ async function askSingleChoice(
 			render,
 			invalidate: () => {
 				cachedLines = undefined;
+				editor.invalidate();
 			},
 			handleInput,
 		};
 	});
 }
 
-async function askMultiChoice(
-	ctx: any,
-	question: string,
-	context: string | undefined,
-	options: AskOption[],
-): Promise<AskAnswer[] | null> {
+/**
+ * 多选：同上，另加 Send 行与勾选标记。
+ */
+async function askMultiChoice(ctx: any, live: AskLive): Promise<AskAnswer[] | null> {
+	const options = live.options;
+	const otherIndex = options.length;
+	const submitIndex = options.length + 1;
 	const otherLabel = getOtherLabel(options);
-	const choiceItems: DisplayOption[] = options.map((option, index) => ({
-		...option,
-		id: `option:${index}`,
-		index: index + 1,
-	}));
-	const submitItem: DisplayOption = { id: "submit", label: "Send", value: "__submit__", isSubmit: true };
-	const allItems: DisplayOption[] = [
-		...choiceItems,
-		{ id: "other", label: otherLabel, value: "__other__", isOther: true },
-		submitItem,
-	];
 
-	return ctx.ui.custom<AskAnswer[] | null>((tui: any, theme: any, _kb: any, done: (result: AskAnswer[] | null) => void) => {
-		let optionIndex = 0;
-		let editMode = false;
-		let cachedLines: string[] | undefined;
-		let cachedWidth = -1;
-		const selected = new Map<string, AskAnswer>();
-		const editor = new Editor(tui, createEditorTheme(theme));
+	return ctx.ui.custom<AskAnswer[] | null>(
+		(tui: any, theme: any, _kb: any, done: (result: AskAnswer[] | null) => void) => {
+			let cachedLines: string[] | undefined;
+			let cachedWidth = -1;
+			const editor = new Editor(tui, createEditorTheme(theme));
 
-		editor.onSubmit = (value) => {
-			const trimmed = value.trim();
-			if (!trimmed) return;
-			selected.set("other", { type: "other", label: trimmed, value: trimmed });
-			editMode = false;
-			refresh();
-		};
-
-		function refresh() {
-			cachedLines = undefined;
-			tui.requestRender();
-		}
-
-		function toggleOption(item: DisplayOption) {
-			if (selected.has(item.id)) {
-				selected.delete(item.id);
-			} else {
-				selected.set(item.id, {
-					type: "option",
-					label: item.label,
-					value: item.value,
-					index: item.index!,
-				});
-			}
-			refresh();
-		}
-
-		function handleInput(data: string) {
-			if (editMode) {
-				if (matchesKey(data, Key.escape)) {
-					editMode = false;
-					editor.setText(selected.get("other")?.label || "");
-					refresh();
-					return;
-				}
-				editor.handleInput(data);
+			editor.onSubmit = (value) => {
+				const trimmed = value.trim();
+				if (!trimmed) return;
+				live.selected.set("other", { type: "other", label: trimmed, value: trimmed });
+				live.otherText = trimmed;
+				live.editing = false;
 				refresh();
-				return;
-			}
+			};
 
-			if (matchesKey(data, Key.up)) {
-				optionIndex = Math.max(0, optionIndex - 1);
-				refresh();
-				return;
-			}
-			if (matchesKey(data, Key.down)) {
-				optionIndex = Math.min(allItems.length - 1, optionIndex + 1);
-				refresh();
-				return;
-			}
-
-			const current = allItems[optionIndex];
-			if (matchesKey(data, Key.enter)) {
-				if (current.isSubmit) {
-					if (selected.size > 0) {
-						done(sortAnswers(Array.from(selected.values())));
-					}
-					return;
-				}
-				if (current.isOther) {
-					editMode = true;
-					editor.setText(selected.get("other")?.label || "");
-					refresh();
-					return;
-				}
-				toggleOption(current);
-				return;
-			}
-
-			if (matchesKey(data, Key.escape)) {
-				done(null);
-			}
-		}
-
-		function render(width: number): string[] {
-			// The cache MUST be keyed on width: pi-tui calls requestRender() but NOT
-			// invalidate() on terminal resize, so render() can be re-entered with a
-			// new width. Returning stale wider lines trips the TUI width guard and
-			// crashes the process.
-			if (cachedLines && cachedWidth === width) return cachedLines;
-
-			const lines: string[] = [];
-			const add = (text: string) => lines.push(truncateToWidth(text, width));
-
-			add(theme.fg("accent", "─".repeat(width)));
-			addWrapped(lines, theme.fg("text", ` ${question}`), width);
-			if (context) {
-				lines.push("");
-				addWrapped(lines, theme.fg("muted", ` ${context}`), width);
-			}
-			lines.push("");
-
-			for (let i = 0; i < allItems.length; i++) {
-				const item = allItems[i];
-				const isFocused = i === optionIndex;
-				const prefix = isFocused ? theme.fg("accent", "> ") : "  ";
-
-				if (item.isSubmit) {
-					const label = selected.size > 0 ? `✓ ${item.label} (${selected.size} selected)` : `○ ${item.label}`;
-					const styled = isFocused
-						? theme.fg("accent", label)
-						: theme.fg(selected.size > 0 ? "success" : "dim", label);
-					add(`${prefix}${styled}`);
-					continue;
-				}
-
-				if (item.isOther) {
-					const other = selected.get("other");
-					const marker = other ? "[x]" : "[ ]";
-					const suffix = other ? ` — ${other.label}` : "";
-					const styled = isFocused
-						? theme.fg("accent", `${marker} ${item.label}${suffix}`)
-						: theme.fg(other ? "success" : "text", `${marker} ${item.label}${suffix}`);
-					add(`${prefix}${styled}`);
-					continue;
-				}
-
-				const checked = selected.has(item.id);
-				const marker = checked ? "[x]" : "[ ]";
-				const label = `${marker} ${item.index}. ${item.label}`;
-				const styled = isFocused
-					? theme.fg("accent", label)
-					: theme.fg(checked ? "success" : "text", label);
-				add(`${prefix}${styled}`);
-				if (item.description) {
-					addWrapped(lines, theme.fg("muted", item.description), width, "     ");
-				}
-			}
-
-			if (editMode) {
-				lines.push("");
-				add(theme.fg("muted", " Write your custom answer:"));
-				for (const line of editor.render(Math.max(1, width - 2))) {
-					add(` ${line}`);
-				}
-				lines.push("");
-				add(theme.fg("dim", " Enter to save • Esc to go back"));
-			} else {
-				lines.push("");
-				if (selected.size === 0) {
-					add(theme.fg("warning", " Select at least one answer before sending."));
-				}
-				add(theme.fg("dim", " ↑↓ navigate • Enter toggle • Send to submit • Esc cancel"));
-			}
-
-			add(theme.fg("accent", "─".repeat(width)));
-			cachedLines = lines;
-			cachedWidth = width;
-			return lines;
-		}
-
-		return {
-			render,
-			invalidate: () => {
+			function refresh() {
 				cachedLines = undefined;
-			},
-			handleInput,
-		};
-	});
+				bump(live);
+				tui.requestRender();
+			}
+
+			function toggleOption(index: number) {
+				const key = `option:${index}`;
+				if (live.selected.has(key)) {
+					live.selected.delete(key);
+				} else {
+					const option = options[index];
+					live.selected.set(key, {
+						type: "option",
+						label: option.label,
+						value: option.value,
+						index: index + 1,
+					});
+				}
+				refresh();
+			}
+
+			function handleInput(data: string) {
+				if (live.editing) {
+					if (matchesKey(data, Key.escape)) {
+						live.editing = false;
+						live.otherText = live.selected.get("other")?.label || "";
+						editor.setText(live.otherText);
+						refresh();
+						return;
+					}
+					editor.handleInput(data);
+					live.otherText = editor.getText();
+					refresh();
+					return;
+				}
+
+				if (matchesKey(data, Key.up)) {
+					live.cursor = Math.max(0, live.cursor - 1);
+					refresh();
+					return;
+				}
+				if (matchesKey(data, Key.down)) {
+					live.cursor = Math.min(submitIndex, live.cursor + 1);
+					refresh();
+					return;
+				}
+
+				if (matchesKey(data, Key.enter)) {
+					if (live.cursor === submitIndex) {
+						if (live.selected.size > 0) {
+							done(sortAnswers(Array.from(live.selected.values())));
+						}
+						return;
+					}
+					if (live.cursor === otherIndex) {
+						live.editing = true;
+						live.otherText = live.selected.get("other")?.label || "";
+						editor.setText(live.otherText);
+						refresh();
+						return;
+					}
+					toggleOption(live.cursor);
+					return;
+				}
+
+				if (matchesKey(data, Key.escape)) {
+					done(null);
+				}
+			}
+
+			function render(width: number): string[] {
+				if (cachedLines && cachedWidth === width) return cachedLines;
+
+				const lines: string[] = [];
+				if (live.editing) {
+					lines.push(...renderEditorBlock(theme, width, `${otherLabel}：`, editor));
+					lines.push(hintLine(theme, width, "Enter 保存 · Esc 返回"));
+				} else {
+					if (live.selected.size === 0) {
+						lines.push(truncateToWidth(theme.fg("warning", " 至少选一项再 Send"), width));
+					}
+					lines.push(hintLine(theme, width, "↑↓ 移动 · Enter 勾选 · Send 提交 · Esc 取消"));
+				}
+
+				if (live.editing) {
+					cachedLines = undefined;
+					cachedWidth = -1;
+				} else {
+					cachedLines = lines;
+					cachedWidth = width;
+				}
+				return lines;
+			}
+
+			return {
+				render,
+				invalidate: () => {
+					cachedLines = undefined;
+					editor.invalidate();
+				},
+				handleInput,
+			};
+		},
+	);
 }
 
 // Shared UI mutex. ctx.ui.custom()/editor can only handle one active call at
@@ -540,7 +547,7 @@ function getSharedUiLock() {
 			},
 		};
 	}
-	return g[SHARED_UI_LOCK_KEY] as { withLock<T>(fn: () => T | Promise<T>): Promise<T> };
+	return g[SHARED_UI_LOCK_KEY] as { withLock<T>(fn: () => Promise<T>): Promise<T> };
 }
 const sharedUiLock = getSharedUiLock();
 
@@ -567,7 +574,7 @@ export default function askUserQuestion(pi: ExtensionAPI) {
 		],
 		parameters: AskUserQuestionParams,
 
-		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+		async execute(toolCallId, params, signal, _onUpdate, ctx) {
 			const options = normalizeOptions(params.options);
 			const context = params.details?.trim() || undefined;
 			const mode: AskUserQuestionMode = options.length === 0 ? "text" : params.multiSelect ? "multi-select" : "single-select";
@@ -580,8 +587,8 @@ export default function askUserQuestion(pi: ExtensionAPI) {
 				return unavailableResult(params.question, mode, "ask_user_question requires interactive mode UI", context);
 			}
 
-			return withUILock(async () => {
-				if (mode === "text") {
+			if (mode === "text") {
+				return withUILock(async () => {
 					const editorTitle = context ? `${params.question}\n\n${context}` : params.question;
 					const answer = await ctx.ui.editor(editorTitle);
 					if (answer === undefined) {
@@ -590,35 +597,55 @@ export default function askUserQuestion(pi: ExtensionAPI) {
 					return buildResult(params.question, context, mode, [
 						{ type: "text", label: answer.trim(), value: answer.trim() },
 					]);
-				}
+				});
+			}
 
-				if (mode === "single-select") {
-					const answer = await askSingleChoice(ctx, params.question, context, options);
-					if (!answer) {
+			const live: AskLive = {
+				toolCallId,
+				question: params.question,
+				context,
+				options,
+				multi: mode === "multi-select",
+				cursor: 0,
+				editing: false,
+				otherText: "",
+				selected: new Map(),
+				version: 0,
+			};
+			askLive.set(toolCallId, live);
+
+			try {
+				return await withUILock(async () => {
+					const answers = live.multi
+						? await askMultiChoice(ctx, live)
+						: await askSingleChoice(ctx, live);
+					if (!answers) {
 						return cancelledResult(params.question, mode, context);
 					}
-					return buildResult(params.question, context, mode, [answer]);
-				}
-
-				const answers = await askMultiChoice(ctx, params.question, context, options);
-				if (!answers) {
-					return cancelledResult(params.question, mode, context);
-				}
-				return buildResult(params.question, context, mode, answers);
-			});
+					return buildResult(params.question, context, mode, Array.isArray(answers) ? answers : [answers]);
+				});
+			} finally {
+				// 正文那一行随即回落到静态版（答案由 renderResult 画在下面）。
+				askLive.delete(toolCallId);
+			}
 		},
 
-		renderCall(args, theme) {
-			const options = normalizeOptions(args.options as Array<{ label: string; value?: string; description?: string }> | undefined);
-			let text = theme.fg("toolTitle", theme.bold("ask_user_question ")) + theme.fg("muted", args.question);
-			if (args.multiSelect) {
-				text += theme.fg("dim", " [multi-select]");
-			}
-			if (options.length > 0) {
-				const labels = [...options.map((option) => option.label), getOtherLabel(options)].join(", ");
-				text += `\n${theme.fg("dim", `  Options: ${labels}`)}`;
-			}
-			return new Text(text, 0, 0);
+		renderCall(args, theme, context) {
+			// 题目画在会话正文里：pi 把工具调用的 call 组件与 result 组件并排画在同一行，
+			// 工具结束后 call 组件仍然保留，所以题目会留在会话末尾、跟着消息一起滚动。
+			// 提问进行中画交互版（光标/勾选），结束后回落到静态版（答案在下面那行）。
+			const id = context.toolCallId;
+			const current = () => askLive.get(id);
+			return new LiveLines(
+				() => {
+					const live = current();
+					return live ? `live:${live.version}` : "static";
+				},
+				(width) => {
+					const live = current();
+					return live ? renderLivePanel(theme, width, live) : renderStaticPanel(theme, width, args);
+				},
+			);
 		},
 
 		renderResult(result, _options, theme) {

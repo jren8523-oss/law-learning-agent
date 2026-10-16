@@ -9,6 +9,7 @@ import {
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import { LiveLines, LiveRegistry, hintLine, optionRow, renderEditorBlock } from "./lib/inline-question.ts";
 
 // ────────────────────────────────────────────────────────────────────────────
 // quiz — a GRADED sibling of ask_user_question.
@@ -27,12 +28,6 @@ interface QuizOption {
 	label: string;
 	value: string;
 	description?: string;
-}
-
-interface DisplayOption extends QuizOption {
-	id: string;
-	index: number;
-	isSubmit?: boolean;
 }
 
 interface OptionAnswer {
@@ -386,37 +381,136 @@ function renderFeedback(
 		lines.push("");
 		addWrapped(lines, theme.fg("text", explanation), width, " ");
 	}
-	// No trailing hint here: callers append the note field and a phase-specific
-	// hint line, since the note editor is also available during feedback.
+	// The hint line and the note input live in the bottom bar now (see
+	// renderQuizLive / the ask* components), so this only draws the feedback body.
 }
 
-// Top border + question + optional context. Shared by both components.
-function pushHeader(lines: string[], theme: any, width: number, question: string, context: string | undefined): void {
-	lines.push(truncateToWidth(theme.fg("accent", "─".repeat(width)), width));
-	addWrapped(lines, theme.fg("text", question), width, " ");
-	if (context) {
-		lines.push("");
-		addWrapped(lines, theme.fg("muted", context), width, " ");
+// ────────────────────────────────────────────────────────────────────────────
+// 题目画在会话正文里（renderCall），屏幕底部只留一行操作条（ctx.ui.custom）。
+// 两边都要读同一份状态，所以放 QuizLive；正文那一行靠 version 自检重算。
+// ────────────────────────────────────────────────────────────────────────────
+
+const DONT_KNOW_KEY = "dont-know"; // 多选的 selected map 里代表「I don't know」
+
+interface QuizLive {
+	toolCallId: string;
+	question: string;
+	context: string | undefined;
+	options: QuizOption[]; // 已 shuffle 的显示顺序
+	correctIndices: number[];
+	explanation: string | undefined;
+	multi: boolean;
+	/** 显示行下标：0..n-1＝选项、n＝I don't know；多选再加一行 Send。 */
+	cursor: number;
+	phase: "select" | "feedback";
+	focus: "options" | "note";
+	chosen: OptionAnswer | null; // 单选选中项
+	dontKnow: boolean; // 单选选了「I don't know」
+	selected: Map<string, OptionAnswer>; // 多选（键含 DONT_KNOW_KEY）
+	note: string; // 笔记编辑器内容的镜像，供正文那一行显示
+	version: number;
+}
+
+const quizLive = new LiveRegistry<QuizLive>();
+
+function bumpQuiz(live: QuizLive): void {
+	live.version += 1;
+}
+
+function noteOf(live: QuizLive): string | undefined {
+	const t = live.note.trim();
+	return t.length ? t : undefined;
+}
+
+function liveRealAnswers(live: QuizLive): OptionAnswer[] {
+	return sortAnswers(Array.from(live.selected.values()).filter((a) => a.index !== DONT_KNOW_INDEX));
+}
+
+function liveDontKnow(live: QuizLive): boolean {
+	return live.multi ? live.selected.has(DONT_KNOW_KEY) : live.dontKnow;
+}
+
+/**
+ * 提问进行中的正文版：
+ *   select   ：题干 + 选项（当前项 `> ` 高亮）+ I don't know（+ 多选的 Send）
+ *   feedback ：renderFeedback 的 ✓/✗ + 判定 + 正确项 + 解析
+ * 笔记只画一行镜像，真正的输入框在底部条里。
+ */
+function renderQuizLive(theme: any, width: number, live: QuizLive): string[] {
+	const lines: string[] = [];
+	const add = (text: string) => lines.push(truncateToWidth(text, width));
+	const optionsFocused = live.focus === "options";
+
+	add(theme.fg("toolTitle", theme.bold("quiz ")) + theme.fg("text", live.question));
+	if (live.context) {
+		addWrapped(lines, theme.fg("muted", live.context), width, "  ");
 	}
+
+	if (live.phase === "feedback") {
+		renderFeedback(
+			lines,
+			theme,
+			width,
+			live.options,
+			live.multi ? liveRealAnswers(live).map((a) => a.index) : live.chosen ? [live.chosen.index] : [],
+			live.correctIndices,
+			live.explanation,
+			liveDontKnow(live),
+			noteOf(live),
+		);
+		return lines;
+	}
+
+	for (let i = 0; i < live.options.length; i++) {
+		const option = live.options[i];
+		const marker = live.multi
+			? `${live.selected.has(`option:${i}`) ? "[x]" : "[ ]"} ${i + 1}. `
+			: `${i + 1}. `;
+		add(optionRow(theme, optionsFocused && live.cursor === i, `${marker}${option.label}`, option.description));
+	}
+
+	// I don't know：刻意压暗，读起来与可判分的选项分开。
+	const checked = liveDontKnow(live);
+	const dontKnowFocused = optionsFocused && live.cursor === live.options.length;
+	const dontKnowLabel = live.multi ? `${checked ? "[x]" : "[ ]"} ${DONT_KNOW_LABEL}` : DONT_KNOW_LABEL;
+	const dontKnowPrefix = dontKnowFocused ? theme.fg("accent", "> ") : "  ";
+	const dontKnowStyled = dontKnowFocused
+		? theme.fg("accent", dontKnowLabel)
+		: theme.fg(checked ? "warning" : "dim", dontKnowLabel);
+	add(`${dontKnowPrefix}${dontKnowStyled}`);
+
+	if (live.multi) {
+		const submitLabel = live.selected.size > 0 ? `✓ Send (${live.selected.size} selected)` : "○ Send";
+		add(optionRow(theme, optionsFocused && live.cursor === live.options.length + 1, submitLabel));
+	}
+
+	if (live.note.trim().length > 0) {
+		addWrapped(lines, theme.fg("muted", `Note: ${live.note}`), width, "  ");
+	}
+	return lines;
 }
 
-// The "I don't know" row in the selection list — visually separated and dimmed
-// so it reads as distinct from the real, gradable options.
-function pushDontKnowRow(lines: string[], theme: any, width: number, focused: boolean): void {
-	lines.push("");
-	const prefix = focused ? theme.fg("accent", "> ") : "  ";
-	const styled = focused ? theme.fg("accent", DONT_KNOW_LABEL) : theme.fg("dim", DONT_KNOW_LABEL);
-	lines.push(truncateToWidth(`${prefix}${styled}`, width));
-}
-
-// Persistent, always-present note field rendered under the options during the
-// select phase. Applies to ANY answer (including "I don't know") and is only
-// surfaced to the agent when non-empty.
-function pushNoteField(lines: string[], theme: any, width: number, editor: Editor, focused: boolean): void {
-	lines.push("");
-	const label = focused ? theme.fg("accent", "Note (optional):") : theme.fg("muted", "Note (optional):");
-	addWrapped(lines, label, width, " ");
-	for (const line of editor.render(width)) lines.push(line);
+/**
+ * 问答结束后的正文版：就是原来的单行标题。
+ * 题目/选项/✓✗/解析由 renderResult 完整复述，所以这里不要重复画。
+ */
+function renderQuizStatic(theme: any, width: number, args: any): string[] {
+	let text = theme.fg("toolTitle", theme.bold("quiz ")) + theme.fg("muted", args.question);
+	if (args.multiSelect) {
+		text += theme.fg("dim", " [multi-select]");
+	}
+	try {
+		const options = normalizeOptions(args.options as Array<{ label: string; value?: string; description?: string }> | undefined);
+		if (options.length > 0) {
+			const noun = options.length === 1 ? "option" : "options";
+			text += theme.fg("dim", ` (${options.length} ${noun})`);
+		}
+	} catch {
+		// 参数还在流式、或本身不合法：只画标题就好
+	}
+	const lines: string[] = [];
+	addWrapped(lines, text, width);
+	return lines;
 }
 
 // Build the note Editor. `disableSubmit` is set because Enter must NOT submit
@@ -431,72 +525,53 @@ function makeNoteEditor(tui: any, theme: any): Editor {
 	return editor;
 }
 
-async function askSingleChoice(
-	ctx: any,
-	question: string,
-	context: string | undefined,
-	options: QuizOption[],
-	correctIndices: number[],
-	explanation: string | undefined,
-): Promise<QuizResponse | null> {
-	const allOptions: DisplayOption[] = options.map((option, index) => ({
-		...option,
-		id: `option:${index}`,
-		index: index + 1,
-	}));
-	const dontKnowNav = allOptions.length; // nav index of the "I don't know" row
+async function askSingleChoice(ctx: any, live: QuizLive): Promise<QuizResponse | null> {
+	const options = live.options;
+	const dontKnowNav = options.length; // nav index of the "I don't know" row
 
 	return ctx.ui.custom<QuizResponse | null>(
 		(tui: any, theme: any, _kb: any, done: (result: QuizResponse | null) => void) => {
-			let optionIndex = 0;
-			let phase: "select" | "feedback" = "select";
-			let focus: "options" | "note" = "options";
-			let chosen: OptionAnswer | null = null;
-			let dontKnow = false;
 			const editor = makeNoteEditor(tui, theme);
 			let cachedLines: string[] | undefined;
 			let cachedWidth = -1;
 
 			function refresh() {
 				cachedLines = undefined;
+				bumpQuiz(live);
 				tui.requestRender();
 			}
 
-			function noteText(): string | undefined {
-				const t = editor.getText().trim();
-				return t.length ? t : undefined;
-			}
-
 			function toOptions() {
-				focus = "options";
+				live.focus = "options";
 				editor.focused = false;
 				refresh();
 			}
 
 			function response(): QuizResponse {
-				const note = noteText();
-				return dontKnow
+				const note = noteOf(live);
+				return live.dontKnow
 					? { dontKnow: true, note, answers: [] }
-					: { dontKnow: false, note, answers: chosen ? [chosen] : [] };
+					: { dontKnow: false, note, answers: live.chosen ? [live.chosen] : [] };
 			}
 
 			function handleInput(data: string) {
-				if (phase === "feedback") {
+				if (live.phase === "feedback") {
 					// Tab toggles focus between the static result view and the note
 					// field: the user may want to comment on the explanation itself.
 					if (matchesKey(data, Key.tab)) {
-						focus = focus === "options" ? "note" : "options";
-						editor.focused = focus === "note";
+						live.focus = live.focus === "options" ? "note" : "options";
+						editor.focused = live.focus === "note";
 						refresh();
 						return;
 					}
-					if (focus === "note") {
+					if (live.focus === "note") {
 						if (matchesKey(data, Key.enter) || matchesKey(data, Key.escape)) {
 							toOptions();
 							return;
 						}
 						editor.handleInput(data);
-						tui.requestRender();
+						live.note = editor.getText();
+						refresh();
 						return;
 					}
 					if (matchesKey(data, Key.enter) || matchesKey(data, Key.escape)) {
@@ -507,13 +582,13 @@ async function askSingleChoice(
 
 				// Tab toggles focus between the options list and the note field.
 				if (matchesKey(data, Key.tab)) {
-					focus = focus === "options" ? "note" : "options";
-					editor.focused = focus === "note";
+					live.focus = live.focus === "options" ? "note" : "options";
+					editor.focused = live.focus === "note";
 					refresh();
 					return;
 				}
 
-				if (focus === "note") {
+				if (live.focus === "note") {
 					// Enter and Esc both return to the options and keep the note text.
 					// (Enter must be intercepted here: the editor's own submit clears
 					// the buffer. Ctrl+J still reaches the editor as a newline.)
@@ -522,31 +597,32 @@ async function askSingleChoice(
 						return;
 					}
 					editor.handleInput(data);
-					tui.requestRender();
+					live.note = editor.getText();
+					refresh();
 					return;
 				}
 
 				// focus === "options"
 				if (matchesKey(data, Key.up)) {
-					optionIndex = Math.max(0, optionIndex - 1);
+					live.cursor = Math.max(0, live.cursor - 1);
 					refresh();
 					return;
 				}
 				if (matchesKey(data, Key.down)) {
-					optionIndex = Math.min(dontKnowNav, optionIndex + 1);
+					live.cursor = Math.min(dontKnowNav, live.cursor + 1);
 					refresh();
 					return;
 				}
 				if (matchesKey(data, Key.enter)) {
-					if (optionIndex === dontKnowNav) {
-						dontKnow = true;
-						chosen = null;
+					if (live.cursor === dontKnowNav) {
+						live.dontKnow = true;
+						live.chosen = null;
 					} else {
-						const selected = allOptions[optionIndex];
-						chosen = { label: selected.label, value: selected.value, index: selected.index };
-						dontKnow = false;
+						const selected = options[live.cursor];
+						live.chosen = { label: selected.label, value: selected.value, index: live.cursor + 1 };
+						live.dontKnow = false;
 					}
-					phase = "feedback";
+					live.phase = "feedback";
 					refresh();
 					return;
 				}
@@ -562,64 +638,24 @@ async function askSingleChoice(
 				// crashes the process.
 				if (cachedLines && cachedWidth === width) return cachedLines;
 
+				// 题目与选项画在会话正文里（renderQuizLive），这里只留操作提示；
+				// 要打笔记时才把输入框放到底部。
+				const noteFocused = live.focus === "note";
 				const lines: string[] = [];
-				const add = (text: string) => lines.push(truncateToWidth(text, width));
-				pushHeader(lines, theme, width, question, context);
-
-				if (phase === "feedback") {
-					renderFeedback(
-						lines,
-						theme,
-						width,
-						options,
-						chosen ? [chosen.index] : [],
-						correctIndices,
-						explanation,
-						dontKnow,
-						noteText(),
-					);
-					pushNoteField(lines, theme, width, editor, focus === "note");
-					lines.push("");
-					if (focus === "note") {
-						add(theme.fg("dim", " Type note • Ctrl+J newline • Enter/Tab back • Esc back"));
-					} else {
-						add(theme.fg("dim", " Enter/Esc to continue • Tab note"));
-					}
-					add(theme.fg("accent", "─".repeat(width)));
-					// Not cached when the note is focused: the editor renders a live cursor.
-					if (focus !== "note") {
-						cachedLines = lines;
-						cachedWidth = width;
-					}
-					return lines;
-				}
-
-				lines.push("");
-				for (let i = 0; i < allOptions.length; i++) {
-					const option = allOptions[i];
-					const selected = focus === "options" && i === optionIndex;
-					const prefix = selected ? theme.fg("accent", "> ") : "  ";
-					const label = `${option.index}. ${option.label}`;
-					const styled = selected ? theme.fg("accent", label) : theme.fg("text", label);
-					add(`${prefix}${styled}`);
-					if (option.description) {
-						addWrapped(lines, theme.fg("muted", option.description), width, "     ");
-					}
-				}
-
-				pushDontKnowRow(lines, theme, width, focus === "options" && optionIndex === dontKnowNav);
-
-				pushNoteField(lines, theme, width, editor, focus === "note");
-
-				lines.push("");
-				if (focus === "note") {
-					add(theme.fg("dim", " Type note • Ctrl+J newline • Enter back to options • Tab options • Esc back"));
+				if (noteFocused) {
+					lines.push(...renderEditorBlock(theme, width, "笔记（可选）：", editor));
+					lines.push(hintLine(theme, width, "Enter/Tab 返回选项 · Ctrl+J 换行 · Esc 返回"));
+				} else if (live.phase === "feedback") {
+					lines.push(hintLine(theme, width, "Enter 继续 · Tab 记笔记"));
 				} else {
-					add(theme.fg("dim", " ↑↓ navigate • Enter answer • Tab note • Esc cancel"));
+					lines.push(hintLine(theme, width, "↑↓ 选择 · Enter 确认 · Tab 记笔记 · Esc 取消"));
 				}
-				add(theme.fg("accent", "─".repeat(width)));
-				// Not cached when the note is focused: the editor renders a live cursor.
-				if (focus !== "note") {
+
+				// 笔记聚焦时不缓存：编辑器画的是活光标。
+				if (noteFocused) {
+					cachedLines = undefined;
+					cachedWidth = -1;
+				} else {
 					cachedLines = lines;
 					cachedWidth = width;
 				}
@@ -638,110 +674,87 @@ async function askSingleChoice(
 	);
 }
 
-async function askMultiChoice(
-	ctx: any,
-	question: string,
-	context: string | undefined,
-	options: QuizOption[],
-	correctIndices: number[],
-	explanation: string | undefined,
-): Promise<QuizResponse | null> {
-	const DONT_KNOW_ID = "dont-know";
-	const choiceItems: DisplayOption[] = options.map((option, index) => ({
-		...option,
-		id: `option:${index}`,
-		index: index + 1,
-	}));
-	const dontKnowItem: DisplayOption = {
-		id: DONT_KNOW_ID,
-		label: DONT_KNOW_LABEL,
-		value: DONT_KNOW_VALUE,
-		index: DONT_KNOW_INDEX,
-	};
-	const submitItem: DisplayOption = { id: "submit", label: "Send", value: "__submit__", index: -1, isSubmit: true };
-	const allItems: DisplayOption[] = [...choiceItems, dontKnowItem, submitItem];
+async function askMultiChoice(ctx: any, live: QuizLive): Promise<QuizResponse | null> {
+	const options = live.options;
+	const dontKnowNav = options.length; // nav index of the "I don't know" row
+	const submitNav = options.length + 1; // nav index of the "Send" row
 
 	return ctx.ui.custom<QuizResponse | null>(
 		(tui: any, theme: any, _kb: any, done: (result: QuizResponse | null) => void) => {
-			let optionIndex = 0;
-			let phase: "select" | "feedback" = "select";
-			let focus: "options" | "note" = "options";
 			const editor = makeNoteEditor(tui, theme);
 			let cachedLines: string[] | undefined;
 			let cachedWidth = -1;
-			const selected = new Map<string, OptionAnswer>();
 
 			function refresh() {
 				cachedLines = undefined;
+				bumpQuiz(live);
 				tui.requestRender();
 			}
 
-			function noteText(): string | undefined {
-				const t = editor.getText().trim();
-				return t.length ? t : undefined;
-			}
-
 			function toOptions() {
-				focus = "options";
+				live.focus = "options";
 				editor.focused = false;
 				refresh();
 			}
 
-			const choseDontKnow = () => selected.has(DONT_KNOW_ID);
-			const realAnswers = () =>
-				sortAnswers(Array.from(selected.values()).filter((a) => a.index !== DONT_KNOW_INDEX));
-
 			function response(): QuizResponse {
-				const note = noteText();
-				return choseDontKnow()
+				const note = noteOf(live);
+				return liveDontKnow(live)
 					? { dontKnow: true, note, answers: [] }
-					: { dontKnow: false, note, answers: realAnswers() };
+					: { dontKnow: false, note, answers: liveRealAnswers(live) };
 			}
 
 			// "I don't know" is exclusive: choosing it clears real selections, and
 			// choosing any real option clears "I don't know".
-			function toggleOption(item: DisplayOption) {
-				if (item.id === DONT_KNOW_ID) {
-					if (selected.has(DONT_KNOW_ID)) {
-						selected.delete(DONT_KNOW_ID);
+			function toggleOption(index: number) {
+				if (index === dontKnowNav) {
+					if (live.selected.has(DONT_KNOW_KEY)) {
+						live.selected.delete(DONT_KNOW_KEY);
 					} else {
-						selected.clear();
-						selected.set(DONT_KNOW_ID, { label: item.label, value: item.value, index: item.index });
+						live.selected.clear();
+						live.selected.set(DONT_KNOW_KEY, {
+							label: DONT_KNOW_LABEL,
+							value: DONT_KNOW_VALUE,
+							index: DONT_KNOW_INDEX,
+						});
 					}
 				} else {
-					selected.delete(DONT_KNOW_ID);
-					if (selected.has(item.id)) {
-						selected.delete(item.id);
+					const key = `option:${index}`;
+					live.selected.delete(DONT_KNOW_KEY);
+					if (live.selected.has(key)) {
+						live.selected.delete(key);
 					} else {
-						selected.set(item.id, { label: item.label, value: item.value, index: item.index });
+						const option = options[index];
+						live.selected.set(key, { label: option.label, value: option.value, index: index + 1 });
 					}
 				}
 				refresh();
 			}
 
 			function submit() {
-				if (selected.size === 0) return;
-				phase = "feedback";
+				if (live.selected.size === 0) return;
+				live.phase = "feedback";
 				refresh();
 			}
 
 			function handleInput(data: string) {
-				if (phase === "feedback") {
+				if (live.phase === "feedback") {
 					// Tab toggles focus between the static result view and the note
 					// field: the user may want to comment on the explanation itself.
 					if (matchesKey(data, Key.tab)) {
-						focus = focus === "options" ? "note" : "options";
-						editor.focused = focus === "note";
+						live.focus = live.focus === "options" ? "note" : "options";
+						editor.focused = live.focus === "note";
 						refresh();
 						return;
 					}
-					if (focus === "note") {
+					if (live.focus === "note") {
 						if (matchesKey(data, Key.enter) || matchesKey(data, Key.escape)) {
 							toOptions();
 							return;
 						}
 						editor.handleInput(data);
-						tui.requestRender();
+						live.note = editor.getText();
+						refresh();
 						return;
 					}
 					if (matchesKey(data, Key.enter) || matchesKey(data, Key.escape)) {
@@ -752,13 +765,13 @@ async function askMultiChoice(
 
 				// Tab toggles focus between the options list and the note field.
 				if (matchesKey(data, Key.tab)) {
-					focus = focus === "options" ? "note" : "options";
-					editor.focused = focus === "note";
+					live.focus = live.focus === "options" ? "note" : "options";
+					editor.focused = live.focus === "note";
 					refresh();
 					return;
 				}
 
-				if (focus === "note") {
+				if (live.focus === "note") {
 					// Enter and Esc both return to the options and keep the note text.
 					// (Enter must be intercepted here: the editor's own submit clears
 					// the buffer. Ctrl+J still reaches the editor as a newline.)
@@ -767,29 +780,29 @@ async function askMultiChoice(
 						return;
 					}
 					editor.handleInput(data);
-					tui.requestRender();
+					live.note = editor.getText();
+					refresh();
 					return;
 				}
 
 				// focus === "options"
 				if (matchesKey(data, Key.up)) {
-					optionIndex = Math.max(0, optionIndex - 1);
+					live.cursor = Math.max(0, live.cursor - 1);
 					refresh();
 					return;
 				}
 				if (matchesKey(data, Key.down)) {
-					optionIndex = Math.min(allItems.length - 1, optionIndex + 1);
+					live.cursor = Math.min(submitNav, live.cursor + 1);
 					refresh();
 					return;
 				}
 
-				const current = allItems[optionIndex];
 				if (matchesKey(data, Key.enter)) {
-					if (current.isSubmit) {
+					if (live.cursor === submitNav) {
 						submit();
 						return;
 					}
-					toggleOption(current);
+					toggleOption(live.cursor);
 					return;
 				}
 
@@ -805,86 +818,32 @@ async function askMultiChoice(
 				// crashes the process.
 				if (cachedLines && cachedWidth === width) return cachedLines;
 
+				// 题目与选项画在会话正文里（renderQuizLive），这里只留操作提示。
+				const noteFocused = live.focus === "note";
 				const lines: string[] = [];
-				const add = (text: string) => lines.push(truncateToWidth(text, width));
-				pushHeader(lines, theme, width, question, context);
-
-				if (phase === "feedback") {
-					renderFeedback(
-						lines,
-						theme,
-						width,
-						options,
-						realAnswers().map((a) => a.index),
-						correctIndices,
-						explanation,
-						choseDontKnow(),
-						noteText(),
-					);
-					pushNoteField(lines, theme, width, editor, focus === "note");
-					lines.push("");
-					if (focus === "note") {
-						add(theme.fg("dim", " Type note • Ctrl+J newline • Enter/Tab back • Esc back"));
-					} else {
-						add(theme.fg("dim", " Enter/Esc to continue • Tab note"));
-					}
-					add(theme.fg("accent", "─".repeat(width)));
-					// Not cached when the note is focused: the editor renders a live cursor.
-					if (focus !== "note") {
-						cachedLines = lines;
-						cachedWidth = width;
-					}
-					return lines;
-				}
-
-				lines.push("");
-				for (let i = 0; i < allItems.length; i++) {
-					const item = allItems[i];
-					const isFocused = focus === "options" && i === optionIndex;
-					const prefix = isFocused ? theme.fg("accent", "> ") : "  ";
-
-					if (item.isSubmit) {
-						const label = selected.size > 0 ? `✓ ${item.label} (${selected.size} selected)` : `○ ${item.label}`;
-						const styled = isFocused
-							? theme.fg("accent", label)
-							: theme.fg(selected.size > 0 ? "success" : "dim", label);
-						add(`${prefix}${styled}`);
-						continue;
-					}
-
-					if (item.id === DONT_KNOW_ID) {
-						lines.push(""); // visual separation from the real options
-						const checked = selected.has(item.id);
-						const label = `${checked ? "[x]" : "[ ]"} ${item.label}`;
-						const styled = isFocused ? theme.fg("accent", label) : theme.fg(checked ? "warning" : "dim", label);
-						add(`${prefix}${styled}`);
-						continue;
-					}
-
-					const checked = selected.has(item.id);
-					const marker = checked ? "[x]" : "[ ]";
-					const label = `${marker} ${item.index}. ${item.label}`;
-					const styled = isFocused ? theme.fg("accent", label) : theme.fg(checked ? "success" : "text", label);
-					add(`${prefix}${styled}`);
-					if (item.description) {
-						addWrapped(lines, theme.fg("muted", item.description), width, "     ");
-					}
-				}
-
-				pushNoteField(lines, theme, width, editor, focus === "note");
-
-				lines.push("");
-				if (selected.size === 0) {
-					add(theme.fg("warning", " Select at least one answer before sending."));
-				}
-				if (focus === "note") {
-					add(theme.fg("dim", " Type note • Ctrl+J newline • Enter back to options • Tab options • Esc back"));
+				if (noteFocused) {
+					lines.push(...renderEditorBlock(theme, width, "笔记（可选）：", editor));
+					lines.push(hintLine(theme, width, "Enter/Tab 返回选项 · Ctrl+J 换行 · Esc 返回"));
 				} else {
-					add(theme.fg("dim", " ↑↓ navigate • Enter toggle • Send to submit • Tab note • Esc cancel"));
+					if (live.phase === "select" && live.selected.size === 0) {
+						lines.push(truncateToWidth(theme.fg("warning", " 至少选一项再 Send"), width));
+					}
+					lines.push(
+						hintLine(
+							theme,
+							width,
+							live.phase === "feedback"
+								? "Enter 继续 · Tab 记笔记"
+								: "↑↓ 移动 · Enter 勾选 · Send 提交 · Tab 记笔记 · Esc 取消",
+						),
+					);
 				}
-				add(theme.fg("accent", "─".repeat(width)));
-				// Not cached when the note is focused: the editor renders a live cursor.
-				if (focus !== "note") {
+
+				// 笔记聚焦时不缓存：编辑器画的是活光标。
+				if (noteFocused) {
+					cachedLines = undefined;
+					cachedWidth = -1;
+				} else {
 					cachedLines = lines;
 					cachedWidth = width;
 				}
@@ -962,7 +921,7 @@ export default function quiz(pi: ExtensionAPI) {
 		],
 		parameters: QuizParams,
 
-		async execute(_toolCallId, params, signal, onUpdate, ctx) {
+		async execute(toolCallId, params, signal, onUpdate, ctx) {
 			const context = params.details?.trim() || undefined;
 			const explanation = normalizeEscapedNewlines(params.explanation ?? "").trim();
 			const mode: QuizMode = params.multiSelect ? "multi-select" : "single-select";
@@ -979,17 +938,6 @@ export default function quiz(pi: ExtensionAPI) {
 			if (params.shuffle !== false) {
 				options = shuffleOptions(options);
 			}
-
-			// Emit the true (post-shuffle) display order immediately, before the UI
-			// blocks on the user's answer. Listeners such as md-log rely on this to
-			// show the question in the SAME order the user actually sees it, instead
-			// of the pre-shuffle order the agent originally wrote in its tool call.
-			// Deliberately omits correctIndices/explanation — this fires before the
-			// user has answered and must not leak the answer.
-			onUpdate?.({
-				content: [{ type: "text", text: "Awaiting user response..." }],
-				details: { options: options.map((o, i) => ({ index: i + 1, label: o.label })) },
-			});
 
 			const { indices: correctIndices, error: correctError } = resolveCorrect(
 				params.correctAnswer as string | string[],
@@ -1018,37 +966,74 @@ export default function quiz(pi: ExtensionAPI) {
 				return unavailableResult(params.question, mode, "quiz requires interactive mode UI", correctIndices, context);
 			}
 
-			return withUILock(async () => {
-				const response =
-					mode === "single-select"
-						? await askSingleChoice(ctx, params.question, context, options, correctIndices, explanation)
-						: await askMultiChoice(ctx, params.question, context, options, correctIndices, explanation);
-				if (!response) {
-					return cancelledResult(params.question, mode, correctIndices, context);
-				}
-				return buildResult(params.question, context, mode, options, response, correctIndices, explanation);
+			// Emit the true (post-shuffle) display order immediately, before the UI
+			// blocks on the user's answer. Listeners such as md-log rely on this to
+			// show the question in the SAME order the user actually sees it, instead
+			// of the pre-shuffle order the agent originally wrote in its tool call.
+			// Deliberately omits correctIndices/explanation — this fires before the
+			// user has answered and must not leak the answer.
+			// NOTE: this MUST come after all validation above (P2-17): emitting it
+			// early made md-log write the question before an invalid quiz
+			// (bad correctAnswer / <2 options) bailed out, leaving an orphan
+			// question block in the note with no answer to follow it.
+			onUpdate?.({
+				content: [{ type: "text", text: "Awaiting user response..." }],
+				details: { options: options.map((o, i) => ({ index: i + 1, label: o.label })) },
 			});
+
+			const live: QuizLive = {
+				toolCallId,
+				question: params.question,
+				context,
+				options,
+				correctIndices,
+				explanation,
+				multi: mode === "multi-select",
+				cursor: 0,
+				phase: "select",
+				focus: "options",
+				chosen: null,
+				dontKnow: false,
+				selected: new Map(),
+				note: "",
+				version: 0,
+			};
+			quizLive.set(toolCallId, live);
+
+			try {
+				return await withUILock(async () => {
+					const response =
+						mode === "single-select" ? await askSingleChoice(ctx, live) : await askMultiChoice(ctx, live);
+					if (!response) {
+						return cancelledResult(params.question, mode, correctIndices, context);
+					}
+					return buildResult(params.question, context, mode, options, response, correctIndices, explanation);
+				});
+			} finally {
+				// 正文那一行随即回落到静态标题（题目/选项/✓✗/解析由 renderResult 复述）。
+				quizLive.delete(toolCallId);
+			}
 		},
 
-		renderCall(args, theme) {
+		renderCall(args, theme, context) {
 			// NOTE: never render correctAnswer or explanation here — it would leak
-			// the answer into the transcript before the user responds. We also do NOT
-			// enumerate the options here: they are shuffled at execute time, so any
-			// order shown during streaming would be stale/misleading. The full option
-			// list is rendered — in its true display order — by renderResult after the
-			// user answers.
-			const options = normalizeOptions(
-				args.options as Array<{ label: string; value?: string; description?: string }> | undefined,
+			// the answer into the transcript before the user responds. The live view
+			// (renderQuizLive) draws only the stem, the options in their true shuffled
+			// order, and — once the user has answered — the graded feedback. After the
+			// tool returns, renderResult restates the whole question with ✓/✗ and the
+			// explanation, so the call row falls back to the plain one-line title.
+			const id = context.toolCallId;
+			const current = () => quizLive.get(id);
+			return new LiveLines(
+				() => {
+					const live = current();
+					return live ? `live:${live.version}:${live.phase}` : "static";
+				},
+				(width) => {
+					const live = current();
+					return live ? renderQuizLive(theme, width, live) : renderQuizStatic(theme, width, args);
+				},
 			);
-			let text = theme.fg("toolTitle", theme.bold("quiz ")) + theme.fg("muted", args.question);
-			if (args.multiSelect) {
-				text += theme.fg("dim", " [multi-select]");
-			}
-			if (options.length > 0) {
-				const noun = options.length === 1 ? "option" : "options";
-				text += theme.fg("dim", ` (${options.length} ${noun})`);
-			}
-			return new Text(text, 0, 0);
 		},
 
 		renderResult(result, _options, theme) {

@@ -171,7 +171,15 @@ function normalizeEscapedNewlines(text: string): string {
 		}
 
 		const correctIndices: number[] = details?.correctIndices || [];
-		const correctStr = correctIndices.map((i) => `${i}`).join(", ");
+		// 索引用乱序后的显示序还原成「N. 标签」——与上面 Your answer 行同构；
+		// 选项被 quiz 打乱过，光写数字读者得数回原始列表（P1-16）。
+		const displayed: Array<{ index: number; label: string }> = details?.options || [];
+		const correctStr = correctIndices
+			.map((i) => {
+				const opt = displayed.find((o) => o.index === i);
+				return opt ? `${i}. ${opt.label}` : `${i}`;
+			})
+			.join(", ");
 		body.push(`Correct answer: ${correctStr}`);
 
 		// Optional free-text note the user typed in the always-present note field.

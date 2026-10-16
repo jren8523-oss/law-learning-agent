@@ -1,6 +1,16 @@
-# 原始 PDF 与 OCR 临时产物（体积大、非派生品，不入库）
+# 用户内容 — 一概不进仓库
 material/
 _tmp_ocr/
+notes/
+kb/*
+!kb/README.md
+
+# 个人数据（请复制 .example 文件后填写）
+profile.md
+进程树.md
+.tmp-nav-read.txt
+
+# 原始 PDF 与 OCR 临时产物（体积大、非派生品，不入库）
 
 # Obsidian 瞬时工作区状态（打开文件记录，频繁变动）
 .obsidian/workspace.json
